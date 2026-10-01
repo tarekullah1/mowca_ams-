@@ -7,3 +7,5 @@ djangorestframework-api-key
 psycopg2-binary
 dj-database-url
 django-apscheduler
+gunicorn
+whitenoise
