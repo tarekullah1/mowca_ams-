@@ -1,0 +1,23 @@
+{% extends 'base.html' %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col">
+        <h2 class="h4">Today's Attendance Overview</h2>
+        <p class="text-muted">Auto-refreshes every 30 seconds</p>
+    </div>
+</div>
+
+<div id="dashboard-content" hx-get="{% url 'dashboard-data' %}" hx-trigger="load, every 30s">
+    <!-- Skeleton loader while loading initial data -->
+    <div class="row">
+        <div class="col-md-4 mb-4"><div class="skeleton-loader"></div></div>
+        <div class="col-md-4 mb-4"><div class="skeleton-loader"></div></div>
+        <div class="col-md-4 mb-4"><div class="skeleton-loader"></div></div>
+    </div>
+    <div class="row">
+        <div class="col-md-6 mb-4"><div class="skeleton-loader" style="height: 400px;"></div></div>
+        <div class="col-md-6 mb-4"><div class="skeleton-loader" style="height: 400px;"></div></div>
+    </div>
+</div>
+{% endblock %}

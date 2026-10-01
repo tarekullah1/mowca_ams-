@@ -1,0 +1,154 @@
+<div class="row">
+    <!-- Summary Cards -->
+    <div class="col-md-4 mb-4">
+        <div class="card text-center h-100 py-3">
+            <div class="card-body">
+                <h5 class="card-title text-muted">Total Employees</h5>
+                <h1 class="display-4 fw-bold">{{ summary.total }}</h1>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4 mb-4">
+        <div class="card text-center h-100 py-3">
+            <div class="card-body">
+                <h5 class="card-title present-text">Present Today</h5>
+                <h1 class="display-4 fw-bold present-text">{{ summary.present_count }}</h1>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4 mb-4">
+        <div class="card text-center h-100 py-3">
+            <div class="card-body">
+                <h5 class="card-title absent-text">Absent Today</h5>
+                <h1 class="display-4 fw-bold absent-text">{{ summary.absent_count }}</h1>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <!-- Chart -->
+    <div class="col-lg-4 mb-4">
+        <div class="card h-100 p-4">
+            <h5 class="card-title text-center mb-4">Attendance Ratio</h5>
+            <div style="position: relative; height: 300px; width: 100%;">
+                <canvas id="attendanceChart" hx-preserve="true"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <!-- Lists -->
+    <div class="col-lg-8 mb-4">
+        <div class="row h-100">
+            <!-- Present List -->
+            <div class="col-md-6 mb-4 mb-md-0">
+                <div class="card h-100">
+                    <div class="card-header bg-white border-bottom-0 pt-4 pb-0">
+                        <h5 class="present-text"><i class="bi bi-person-check"></i> Present Employees</h5>
+                    </div>
+                    <div class="card-body table-responsive">
+                        <table class="table table-hover">
+                            <thead>
+                                <tr>
+                                    <th>Code</th>
+                                    <th>Name</th>
+                                    <th>Dept</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for emp in summary.present_employees %}
+                                <tr>
+                                    <td>{{ emp.emp_code }}</td>
+                                    <td>{{ emp.first_name }} {{ emp.last_name|default:"" }}</td>
+                                    <td>{{ emp.department.dept_name|default:"-" }}</td>
+                                </tr>
+                                {% empty %}
+                                <tr>
+                                    <td colspan="3" class="text-center text-muted">No employees present yet.</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Absent List -->
+            <div class="col-md-6">
+                <div class="card h-100">
+                    <div class="card-header bg-white border-bottom-0 pt-4 pb-0">
+                        <h5 class="absent-text"><i class="bi bi-person-x"></i> Absent Employees</h5>
+                    </div>
+                    <div class="card-body table-responsive">
+                        <table class="table table-hover">
+                            <thead>
+                                <tr>
+                                    <th>Code</th>
+                                    <th>Name</th>
+                                    <th>Dept</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for emp in summary.absent_employees %}
+                                <tr>
+                                    <td>{{ emp.emp_code }}</td>
+                                    <td>{{ emp.first_name }} {{ emp.last_name|default:"" }}</td>
+                                    <td>{{ emp.department.dept_name|default:"-" }}</td>
+                                </tr>
+                                {% empty %}
+                                <tr>
+                                    <td colspan="3" class="text-center text-muted">No absent employees!</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // HTMX ensures this script is evaluated when the partial is swapped in
+    (function() {
+        const ctx = document.getElementById('attendanceChart');
+        if (!ctx) return;
+
+        if (window.attendanceChart instanceof Chart) {
+            // Smoothly update data without replacing the chart
+            window.attendanceChart.data.datasets[0].data = [{{ summary.present_count }}, {{ summary.absent_count }}];
+            window.attendanceChart.update();
+        } else {
+            // Initialize chart on first load
+            window.attendanceChart = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: ['Present', 'Absent'],
+                    datasets: [{
+                        data: [{{ summary.present_count }}, {{ summary.absent_count }}],
+                        backgroundColor: [
+                            '#198754', // Bootstrap success green
+                            '#dc3545'  // Bootstrap danger red
+                        ],
+                        borderWidth: 0,
+                        hoverOffset: 4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: {
+                        duration: 800 // Smooth update animation
+                    },
+                    plugins: {
+                        legend: {
+                            position: 'bottom'
+                        }
+                    },
+                    cutout: '70%'
+                }
+            });
+        }
+    })();
+</script>

@@ -1,0 +1,10 @@
+.neon
+node_modules/
+.env
+venv/
+db.sqlite3
+__pycache__/
+*.pyc
+.agents/
+.postman/
+skills-lock.json

@@ -1,0 +1,9 @@
+django>=4.2,<5.0
+requests
+python-dotenv
+django-cors-headers
+djangorestframework
+djangorestframework-api-key
+psycopg2-binary
+dj-database-url
+django-apscheduler
