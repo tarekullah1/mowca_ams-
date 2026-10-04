@@ -183,7 +183,7 @@ def _register_shutdown_hook():
     _shutdown_registered = True
 
 
-def _delete_stale_sync_jobs():
+def clear_stale_sync_jobs():
     stale_job_ids = []
 
     try:
@@ -204,11 +204,15 @@ def _delete_stale_sync_jobs():
                 stale_job_ids.append(stored_job.id)
 
         if stale_job_ids:
-            deleted_count, _ = DjangoJob.objects.filter(id__in=stale_job_ids).delete()
-            logger.info("Deleted %s stale BioTime scheduler job(s).", deleted_count)
+            stale_job_count = len(stale_job_ids)
+            DjangoJob.objects.filter(id__in=stale_job_ids).delete()
+            logger.info("Deleted %s stale BioTime scheduler job(s).", stale_job_count)
+            return stale_job_count
     except DatabaseError:
         logger.exception("Could not clean stale BioTime scheduler jobs.")
         raise
+
+    return 0
 
 
 def _pid_is_running(pid):
@@ -302,7 +306,7 @@ def start_scheduler():
             return None
 
         try:
-            _delete_stale_sync_jobs()
+            clear_stale_sync_jobs()
 
             scheduler = BackgroundScheduler()
             scheduler.add_jobstore(DjangoJobStore(), "default")
