@@ -182,7 +182,7 @@ def clear_stale_sync_jobs():
     stale_job_ids = []
 
     try:
-        for stored_job in DjangoJob.objects.all().only('id', 'job_state').iterator():
+        for stored_job in DjangoJob.objects.all().only('id', 'job_state'):
             if stored_job.id == JOB_ID:
                 stale_job_ids.append(stored_job.id)
                 continue
