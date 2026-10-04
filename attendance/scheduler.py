@@ -2,6 +2,7 @@ import logging
 import atexit
 import os
 import pickle
+import tempfile
 import threading
 from threading import Lock
 from datetime import datetime
@@ -17,15 +18,15 @@ logger = logging.getLogger(__name__)
 
 
 def _get_sync_interval_seconds():
-    raw_interval = os.getenv('BIOTIME_SYNC_INTERVAL_SECONDS', '60')
+    raw_interval = os.getenv('BIOTIME_SYNC_INTERVAL_SECONDS', '300')
     try:
         interval = int(raw_interval)
     except ValueError:
         logger.warning(
-            "Invalid BIOTIME_SYNC_INTERVAL_SECONDS=%r; using 60 seconds.",
+            "Invalid BIOTIME_SYNC_INTERVAL_SECONDS=%r; using 300 seconds.",
             raw_interval,
         )
-        return 60
+        return 300
 
     if interval < 60:
         logger.warning(
@@ -41,9 +42,15 @@ JOB_ID = 'sync_biotime_data'
 JOB_NAME = 'sync_biotime_data'
 JOB_FUNC_REF = 'attendance.scheduler:sync_data_from_biotime'
 SYNC_INTERVAL_SECONDS = _get_sync_interval_seconds()
+SCHEDULER_LOCK_FILE = os.getenv(
+    'BIOTIME_SCHEDULER_LOCK_FILE',
+    os.path.join(tempfile.gettempdir(), 'biotime_scheduler.lock'),
+)
 
 _scheduler = None
+_scheduler_leader_lock_fd = None
 _scheduler_lock = Lock()
+_sync_job_lock = Lock()
 _shutdown_registered = False
 
 
@@ -51,6 +58,10 @@ def sync_data_from_biotime():
     """
     Job that pulls data from BioTime and saves it to the local DB.
     """
+    if not _sync_job_lock.acquire(blocking=False):
+        logger.info("BioTime sync is still running; skipping this tick.")
+        return
+
     logger.info("Starting BioTime data sync...")
     try:
         # Sync Employees / Enrollments
@@ -132,6 +143,8 @@ def sync_data_from_biotime():
         logger.info("BioTime data sync completed successfully.")
     except Exception as e:
         logger.error(f"Error during BioTime data sync: {e}")
+    finally:
+        _sync_job_lock.release()
 
 
 def shutdown_scheduler():
@@ -141,6 +154,7 @@ def shutdown_scheduler():
         scheduler = _scheduler
         if scheduler is None or not scheduler.running:
             _scheduler = None
+            _release_scheduler_leader_lock()
             return
 
         try:
@@ -150,6 +164,7 @@ def shutdown_scheduler():
             logger.warning("Error stopping scheduler: %s", e)
         finally:
             _scheduler = None
+            _release_scheduler_leader_lock()
 
 
 def _register_shutdown_hook():
@@ -196,6 +211,85 @@ def _delete_stale_sync_jobs():
         raise
 
 
+def _pid_is_running(pid):
+    if pid <= 0:
+        return False
+
+    if os.name == 'nt':
+        return pid == os.getpid()
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+    return True
+
+
+def _read_scheduler_lock_pid():
+    try:
+        with open(SCHEDULER_LOCK_FILE, 'r', encoding='utf-8') as lock_file:
+            lock_text = lock_file.read().strip()
+    except OSError:
+        return None
+
+    try:
+        return int(lock_text.split()[0])
+    except (IndexError, ValueError):
+        return None
+
+
+def _acquire_scheduler_leader_lock():
+    global _scheduler_leader_lock_fd
+
+    if _scheduler_leader_lock_fd is not None:
+        return True
+
+    while True:
+        try:
+            lock_fd = os.open(SCHEDULER_LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+        except FileExistsError:
+            lock_pid = _read_scheduler_lock_pid()
+            if lock_pid is not None and _pid_is_running(lock_pid):
+                logger.info("BioTime scheduler is already running in process %s.", lock_pid)
+                return False
+
+            try:
+                os.remove(SCHEDULER_LOCK_FILE)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                logger.warning("Could not remove stale scheduler lock file.")
+                return False
+        else:
+            os.write(lock_fd, str(os.getpid()).encode('utf-8'))
+            _scheduler_leader_lock_fd = lock_fd
+            return True
+
+
+def _release_scheduler_leader_lock():
+    global _scheduler_leader_lock_fd
+
+    if _scheduler_leader_lock_fd is None:
+        return
+
+    try:
+        os.close(_scheduler_leader_lock_fd)
+    finally:
+        _scheduler_leader_lock_fd = None
+
+    try:
+        os.remove(SCHEDULER_LOCK_FILE)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.warning("Could not remove scheduler lock file.")
+
+
 def start_scheduler():
     global _scheduler
 
@@ -204,26 +298,33 @@ def start_scheduler():
             logger.info("Scheduler already running.")
             return _scheduler
 
-        _delete_stale_sync_jobs()
+        if not _acquire_scheduler_leader_lock():
+            return None
 
-        scheduler = BackgroundScheduler()
-        scheduler.add_jobstore(DjangoJobStore(), "default")
+        try:
+            _delete_stale_sync_jobs()
 
-        # Keep the job id stable so persisted schedules are replaced on restart.
-        scheduler.add_job(
-            sync_data_from_biotime,
-            'interval',
-            seconds=SYNC_INTERVAL_SECONDS,
-            id=JOB_ID,
-            name=JOB_NAME,
-            jobstore='default',
-            replace_existing=True,
-            max_instances=1,       # Prevent overlapping runs
-            coalesce=True,         # If multiple missed, only run once
-            misfire_grace_time=max(60, SYNC_INTERVAL_SECONDS),
-        )
-        register_events(scheduler)
-        scheduler.start()
+            scheduler = BackgroundScheduler()
+            scheduler.add_jobstore(DjangoJobStore(), "default")
+
+            # Keep the job id stable so persisted schedules are replaced on restart.
+            scheduler.add_job(
+                sync_data_from_biotime,
+                'interval',
+                seconds=SYNC_INTERVAL_SECONDS,
+                id=JOB_ID,
+                name=JOB_NAME,
+                jobstore='default',
+                replace_existing=True,
+                max_instances=2,       # Let the job-level lock skip overlaps quietly.
+                coalesce=True,         # If multiple missed, only run once
+                misfire_grace_time=max(300, SYNC_INTERVAL_SECONDS),
+            )
+            register_events(scheduler)
+            scheduler.start()
+        except Exception:
+            _release_scheduler_leader_lock()
+            raise
 
         _scheduler = scheduler
         _register_shutdown_hook()
