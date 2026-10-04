@@ -18,6 +18,10 @@ COMMANDS_WITHOUT_SCHEDULER = {
 }
 
 
+def _env_flag_enabled(name):
+    return os.environ.get(name, '').strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
 class AttendanceConfig(AppConfig):
     default_auto_field = 'django.db.models.BigAutoField'
     name = 'attendance'
@@ -31,6 +35,12 @@ class AttendanceConfig(AppConfig):
 
     def _should_start_scheduler(self):
         if os.environ.get('DISABLE_ATTENDANCE_SCHEDULER') == '1':
+            return False
+
+        if not (
+            _env_flag_enabled('ATTENDANCE_SCHEDULER_AUTOSTART')
+            or _env_flag_enabled('BIOTIME_SCHEDULER_AUTOSTART')
+        ):
             return False
 
         command_args = set(sys.argv[1:])
