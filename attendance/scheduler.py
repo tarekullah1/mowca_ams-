@@ -1,15 +1,46 @@
 import logging
 import atexit
+import os
+import pickle
 import threading
 from threading import Lock
 from datetime import datetime
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from django.db import DatabaseError
+from django_apscheduler.models import DjangoJob
 from django_apscheduler.jobstores import DjangoJobStore, register_events
 from .services import get_all_employees, get_today_transactions
 from .models import EmployeeEnrollment, AccessAllocation, AttendanceLog
 
 logger = logging.getLogger(__name__)
+
+
+def _get_sync_interval_seconds():
+    raw_interval = os.getenv('BIOTIME_SYNC_INTERVAL_SECONDS', '60')
+    try:
+        interval = int(raw_interval)
+    except ValueError:
+        logger.warning(
+            "Invalid BIOTIME_SYNC_INTERVAL_SECONDS=%r; using 60 seconds.",
+            raw_interval,
+        )
+        return 60
+
+    if interval < 60:
+        logger.warning(
+            "BIOTIME_SYNC_INTERVAL_SECONDS=%s is too low; using 60 seconds.",
+            interval,
+        )
+        return 60
+
+    return interval
+
+
+JOB_ID = 'sync_biotime_data'
+JOB_NAME = 'sync_biotime_data'
+JOB_FUNC_REF = 'attendance.scheduler:sync_data_from_biotime'
+SYNC_INTERVAL_SECONDS = _get_sync_interval_seconds()
 
 _scheduler = None
 _scheduler_lock = Lock()
@@ -18,7 +49,7 @@ _shutdown_registered = False
 
 def sync_data_from_biotime():
     """
-    Job that runs every 1 minute to pull data from BioTime and save to DB
+    Job that pulls data from BioTime and saves it to the local DB.
     """
     logger.info("Starting BioTime data sync...")
     try:
@@ -137,6 +168,34 @@ def _register_shutdown_hook():
     _shutdown_registered = True
 
 
+def _delete_stale_sync_jobs():
+    stale_job_ids = []
+
+    try:
+        for stored_job in DjangoJob.objects.all().only('id', 'job_state').iterator():
+            if stored_job.id == JOB_ID:
+                stale_job_ids.append(stored_job.id)
+                continue
+
+            try:
+                job_state = pickle.loads(stored_job.job_state)
+            except Exception:
+                continue
+
+            if (
+                job_state.get('name') == JOB_NAME
+                or job_state.get('func') == JOB_FUNC_REF
+            ):
+                stale_job_ids.append(stored_job.id)
+
+        if stale_job_ids:
+            deleted_count, _ = DjangoJob.objects.filter(id__in=stale_job_ids).delete()
+            logger.info("Deleted %s stale BioTime scheduler job(s).", deleted_count)
+    except DatabaseError:
+        logger.exception("Could not clean stale BioTime scheduler jobs.")
+        raise
+
+
 def start_scheduler():
     global _scheduler
 
@@ -145,20 +204,23 @@ def start_scheduler():
             logger.info("Scheduler already running.")
             return _scheduler
 
+        _delete_stale_sync_jobs()
+
         scheduler = BackgroundScheduler()
         scheduler.add_jobstore(DjangoJobStore(), "default")
 
-        # Run every 1 minute
+        # Keep the job id stable so persisted schedules are replaced on restart.
         scheduler.add_job(
             sync_data_from_biotime,
             'interval',
-            minutes=1,
-            name='sync_biotime_data',
+            seconds=SYNC_INTERVAL_SECONDS,
+            id=JOB_ID,
+            name=JOB_NAME,
             jobstore='default',
             replace_existing=True,
             max_instances=1,       # Prevent overlapping runs
             coalesce=True,         # If multiple missed, only run once
-            misfire_grace_time=60, # Allow up to 60s late before skipping
+            misfire_grace_time=max(60, SYNC_INTERVAL_SECONDS),
         )
         register_events(scheduler)
         scheduler.start()
