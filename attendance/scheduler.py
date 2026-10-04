@@ -50,18 +50,15 @@ SCHEDULER_LOCK_FILE = os.getenv(
 _scheduler = None
 _scheduler_leader_lock_fd = None
 _scheduler_lock = Lock()
-_sync_job_lock = Lock()
 _shutdown_registered = False
 
 
 def sync_data_from_biotime():
     """
     Job that pulls data from BioTime and saves it to the local DB.
+    APScheduler is configured with max_instances=1, so overlapping runs are
+    prevented at the scheduler level — no in-process lock is needed here.
     """
-    if not _sync_job_lock.acquire(blocking=False):
-        logger.info("BioTime sync is still running; skipping this tick.")
-        return
-
     logger.info("Starting BioTime data sync...")
     try:
         # Sync Employees / Enrollments
@@ -71,12 +68,12 @@ def sync_data_from_biotime():
             person_name = f"{emp.get('first_name', '')} {emp.get('last_name', '')}".strip()
             dept_data = emp.get('department')
             department = dept_data.get('dept_name') if isinstance(dept_data, dict) else str(dept_data)
-            
+
             # Use app_status for enrollment status
             app_status = emp.get('app_status', 0)
             status_map = {0: "Active", 1: "Inactive"}
             enrollment_status = status_map.get(app_status, str(app_status))
-            
+
             hire_date_str = emp.get('hire_date')
             enrollment_date = None
             if hire_date_str:
@@ -87,7 +84,7 @@ def sync_data_from_biotime():
 
             # Default device for now or extract from area mapping
             device_id = "Default"
-            
+
             EmployeeEnrollment.objects.update_or_create(
                 person_id=person_id,
                 defaults={
@@ -95,7 +92,7 @@ def sync_data_from_biotime():
                     'department': department,
                     'enrollment_status': enrollment_status,
                     'enrollment_date_time': enrollment_date,
-                    'device_id': device_id
+                    'device_id': device_id,
                 }
             )
 
@@ -104,21 +101,21 @@ def sync_data_from_biotime():
         for tx in transactions:
             log_id = str(tx.get('id'))
             person_id = str(tx.get('emp_code'))
-            
+
             # Find person_name from synced employees or just use ID
             emp_enrollment = EmployeeEnrollment.objects.filter(person_id=person_id).first()
             person_name = emp_enrollment.person_name if emp_enrollment else person_id
 
             device_id = tx.get('terminal_alias') or tx.get('terminal_sn') or 'Unknown'
-            
-            punch_time_str = tx.get('punch_time') # Format: 2019-03-04 09:50:00
+
+            punch_time_str = tx.get('punch_time')  # Format: 2019-03-04 09:50:00
             try:
                 dt = datetime.strptime(punch_time_str, "%Y-%m-%d %H:%M:%S")
                 event_date = dt.date()
                 event_time = dt.time()
             except (ValueError, TypeError):
                 continue
-                
+
             punch_state = str(tx.get('punch_state', ''))
             state_map = {"0": "Check-in", "1": "Check-out", "2": "Break-out", "3": "Break-in", "4": "Overtime-in", "5": "Overtime-out"}
             event_type = state_map.get(punch_state, punch_state)
@@ -136,15 +133,13 @@ def sync_data_from_biotime():
                     'event_date': event_date,
                     'event_time': event_time,
                     'event_type': event_type,
-                    'verification_method': verification_method
+                    'verification_method': verification_method,
                 }
             )
-            
+
         logger.info("BioTime data sync completed successfully.")
     except Exception as e:
-        logger.error(f"Error during BioTime data sync: {e}")
-    finally:
-        _sync_job_lock.release()
+        logger.error("Error during BioTime data sync: %s", e)
 
 
 def shutdown_scheduler():
@@ -312,6 +307,10 @@ def start_scheduler():
             scheduler.add_jobstore(DjangoJobStore(), "default")
 
             # Keep the job id stable so persisted schedules are replaced on restart.
+            # max_instances=1 + coalesce=True: APScheduler skips a new fire if the
+            # previous one is still running, and collapses multiple missed fires into
+            # one catch-up run. misfire_grace_time = 2× interval so minor delays
+            # (e.g. slow BioTime responses) are not logged as "missed".
             scheduler.add_job(
                 sync_data_from_biotime,
                 'interval',
@@ -320,9 +319,10 @@ def start_scheduler():
                 name=JOB_NAME,
                 jobstore='default',
                 replace_existing=True,
-                max_instances=2,       # Let the job-level lock skip overlaps quietly.
-                coalesce=True,         # If multiple missed, only run once
-                misfire_grace_time=max(300, SYNC_INTERVAL_SECONDS),
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=max(SYNC_INTERVAL_SECONDS * 2, 120),
+                jitter=min(30, SYNC_INTERVAL_SECONDS // 10),
             )
             register_events(scheduler)
             scheduler.start()
