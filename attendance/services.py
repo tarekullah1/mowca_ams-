@@ -1,100 +1,180 @@
 import os
+import logging
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # Make sure to reload the latest env vars
 load_dotenv(override=True)
+
+logger = logging.getLogger(__name__)
 
 BIOTIME_SERVER_URL = os.getenv('BIOTIME_SERVER_URL', 'http://127.0.0.1:8090')
 BIOTIME_USERNAME = os.getenv('BIOTIME_USERNAME', '')
 BIOTIME_PASSWORD = os.getenv('BIOTIME_PASSWORD', '')
 
+# Timeouts: (connect_timeout, read_timeout) in seconds
+CONNECT_TIMEOUT = 10
+READ_TIMEOUT = 30
+
+# Circuit-breaker: suppress repeated error logs if server is unreachable
+_server_unreachable = False
+_last_unreachable_log = None
+_UNREACHABLE_LOG_INTERVAL = timedelta(minutes=5)  # only log once every 5 mins
+
 # Simple in-memory cache for the token
 _cached_token = None
 
+
+def _log_connection_error(context: str, exc: Exception):
+    """Log connection errors with rate-limiting to avoid log spam in production."""
+    global _server_unreachable, _last_unreachable_log
+    now = datetime.now()
+    if (
+        not _server_unreachable
+        or _last_unreachable_log is None
+        or (now - _last_unreachable_log) >= _UNREACHABLE_LOG_INTERVAL
+    ):
+        logger.error(
+            "[BioTime] %s — BioTime server unreachable at %s. "
+            "If running in production, ensure BIOTIME_SERVER_URL points to a "
+            "publicly accessible host (not a local LAN IP). Error: %s",
+            context,
+            BIOTIME_SERVER_URL,
+            exc,
+        )
+        _server_unreachable = True
+        _last_unreachable_log = now
+
+
+def _make_session() -> requests.Session:
+    """Create a requests session with retry logic."""
+    session = requests.Session()
+    retry = Retry(
+        total=2,
+        backoff_factor=1,
+        status_forcelist=[500, 502, 503, 504],
+        allowed_methods=["GET", "POST"],
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+
 def get_token():
-    global _cached_token
+    global _cached_token, _server_unreachable
     if _cached_token:
         return _cached_token
-        
+
     url = f"{BIOTIME_SERVER_URL}/jwt-api-token-auth/"
     try:
-        response = requests.post(url, json={
-            "username": BIOTIME_USERNAME,
-            "password": BIOTIME_PASSWORD
-        }, timeout=5)
-        
+        session = _make_session()
+        response = session.post(
+            url,
+            json={"username": BIOTIME_USERNAME, "password": BIOTIME_PASSWORD},
+            timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+        )
         if response.status_code == 200:
             data = response.json()
-            _cached_token = data.get('token')
+            _cached_token = data.get("token")
+            _server_unreachable = False  # reset circuit-breaker on success
             return _cached_token
+        else:
+            logger.warning("[BioTime] Token request returned HTTP %s", response.status_code)
+    except requests.exceptions.ConnectionError as e:
+        _log_connection_error("get_token", e)
+    except requests.exceptions.Timeout as e:
+        _log_connection_error("get_token (timeout)", e)
     except Exception as e:
-        print(f"Error fetching token: {e}")
+        logger.error("[BioTime] Unexpected error in get_token: %s", e)
     return None
+
 
 def get_headers():
     token = get_token()
     return {
         "Content-Type": "application/json",
-        "Authorization": f"JWT {token}" if token else ""
+        "Authorization": f"JWT {token}" if token else "",
     }
+
+
+def _invalidate_token():
+    global _cached_token
+    _cached_token = None
+
 
 def get_all_employees():
-    """
-    Fetch all employees from BioTime 9.5
-    """
+    """Fetch all employees from BioTime 9.5."""
     url = f"{BIOTIME_SERVER_URL}/personnel/api/employees/"
+    params = {"page_size": 1000}
     try:
-        response = requests.get(url, headers=get_headers(), params={'page_size': 1000}, timeout=5)
+        session = _make_session()
+        response = session.get(
+            url, headers=get_headers(), params=params,
+            timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+        )
         if response.status_code == 200:
-            data = response.json()
-            return data.get('data', [])
+            _server_unreachable = False
+            return response.json().get("data", [])
         elif response.status_code == 401:
-            # Token expired, clear cache and retry once
-            global _cached_token
-            _cached_token = None
-            response = requests.get(url, headers=get_headers(), params={'page_size': 1000}, timeout=5)
+            # Token expired — clear cache and retry once
+            _invalidate_token()
+            response = session.get(
+                url, headers=get_headers(), params=params,
+                timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+            )
             if response.status_code == 200:
-                data = response.json()
-                return data.get('data', [])
-        return []
+                return response.json().get("data", [])
+        else:
+            logger.warning("[BioTime] get_all_employees returned HTTP %s", response.status_code)
+    except requests.exceptions.ConnectionError as e:
+        _log_connection_error("get_all_employees", e)
+    except requests.exceptions.Timeout as e:
+        _log_connection_error("get_all_employees (timeout)", e)
     except requests.exceptions.RequestException as e:
-        print(f"Error fetching employees: {e}")
-        return []
+        logger.error("[BioTime] Error fetching employees: %s", e)
+    return []
+
 
 def get_today_transactions():
-    """
-    Fetch all transactions for today
-    """
+    """Fetch all transactions for today."""
     url = f"{BIOTIME_SERVER_URL}/iclock/api/transactions/"
     today_str = datetime.now().strftime("%Y-%m-%d")
-    
-    start_time = f"{today_str} 00:00:00"
-    end_time = f"{today_str} 23:59:59"
-    
     params = {
-        'start_time': start_time,
-        'end_time': end_time,
-        'page_size': 5000
+        "start_time": f"{today_str} 00:00:00",
+        "end_time": f"{today_str} 23:59:59",
+        "page_size": 5000,
     }
-    
     try:
-        response = requests.get(url, headers=get_headers(), params=params, timeout=5)
+        session = _make_session()
+        response = session.get(
+            url, headers=get_headers(), params=params,
+            timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+        )
         if response.status_code == 200:
-            data = response.json()
-            return data.get('data', [])
+            _server_unreachable = False
+            return response.json().get("data", [])
         elif response.status_code == 401:
-            global _cached_token
-            _cached_token = None
-            response = requests.get(url, headers=get_headers(), params=params, timeout=5)
+            _invalidate_token()
+            response = session.get(
+                url, headers=get_headers(), params=params,
+                timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+            )
             if response.status_code == 200:
-                data = response.json()
-                return data.get('data', [])
-        return []
+                return response.json().get("data", [])
+        else:
+            logger.warning("[BioTime] get_today_transactions returned HTTP %s", response.status_code)
+    except requests.exceptions.ConnectionError as e:
+        _log_connection_error("get_today_transactions", e)
+    except requests.exceptions.Timeout as e:
+        _log_connection_error("get_today_transactions (timeout)", e)
     except requests.exceptions.RequestException as e:
-        print(f"Error fetching transactions: {e}")
-        return []
+        logger.error("[BioTime] Error fetching transactions: %s", e)
+    return []
 
 from .models import EmployeeEnrollment, AttendanceLog
 

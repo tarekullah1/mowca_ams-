@@ -1,11 +1,20 @@
 import logging
+import atexit
+import threading
+from threading import Lock
+from datetime import datetime
+
 from apscheduler.schedulers.background import BackgroundScheduler
 from django_apscheduler.jobstores import DjangoJobStore, register_events
 from .services import get_all_employees, get_today_transactions
 from .models import EmployeeEnrollment, AccessAllocation, AttendanceLog
-from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+_scheduler = None
+_scheduler_lock = Lock()
+_shutdown_registered = False
+
 
 def sync_data_from_biotime():
     """
@@ -93,19 +102,69 @@ def sync_data_from_biotime():
     except Exception as e:
         logger.error(f"Error during BioTime data sync: {e}")
 
+
+def shutdown_scheduler():
+    global _scheduler
+
+    with _scheduler_lock:
+        scheduler = _scheduler
+        if scheduler is None or not scheduler.running:
+            _scheduler = None
+            return
+
+        try:
+            scheduler.shutdown(wait=False)
+            logger.info("Scheduler stopped.")
+        except Exception as e:
+            logger.warning("Error stopping scheduler: %s", e)
+        finally:
+            _scheduler = None
+
+
+def _register_shutdown_hook():
+    global _shutdown_registered
+
+    if _shutdown_registered:
+        return
+
+    try:
+        threading_atexit = getattr(threading, '_register_atexit')
+    except AttributeError:
+        atexit.register(shutdown_scheduler)
+    else:
+        threading_atexit(shutdown_scheduler)
+
+    _shutdown_registered = True
+
+
 def start_scheduler():
-    scheduler = BackgroundScheduler()
-    scheduler.add_jobstore(DjangoJobStore(), "default")
-    
-    # Run every 1 minute
-    scheduler.add_job(
-        sync_data_from_biotime,
-        'interval',
-        minutes=1,
-        name='sync_biotime_data',
-        jobstore='default',
-        replace_existing=True,
-    )
-    register_events(scheduler)
-    scheduler.start()
-    logger.info("Scheduler started.")
+    global _scheduler
+
+    with _scheduler_lock:
+        if _scheduler is not None and _scheduler.running:
+            logger.info("Scheduler already running.")
+            return _scheduler
+
+        scheduler = BackgroundScheduler()
+        scheduler.add_jobstore(DjangoJobStore(), "default")
+
+        # Run every 1 minute
+        scheduler.add_job(
+            sync_data_from_biotime,
+            'interval',
+            minutes=1,
+            name='sync_biotime_data',
+            jobstore='default',
+            replace_existing=True,
+            max_instances=1,       # Prevent overlapping runs
+            coalesce=True,         # If multiple missed, only run once
+            misfire_grace_time=60, # Allow up to 60s late before skipping
+        )
+        register_events(scheduler)
+        scheduler.start()
+
+        _scheduler = scheduler
+        _register_shutdown_hook()
+
+        logger.info("Scheduler started.")
+        return scheduler
