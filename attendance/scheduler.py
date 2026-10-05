@@ -18,15 +18,15 @@ logger = logging.getLogger(__name__)
 
 
 def _get_sync_interval_seconds():
-    raw_interval = os.getenv('BIOTIME_SYNC_INTERVAL_SECONDS', '300')
+    raw_interval = os.getenv('BIOTIME_SYNC_INTERVAL_SECONDS', '7200')
     try:
         interval = int(raw_interval)
     except ValueError:
         logger.warning(
-            "Invalid BIOTIME_SYNC_INTERVAL_SECONDS=%r; using 300 seconds.",
+            "Invalid BIOTIME_SYNC_INTERVAL_SECONDS=%r; using 7200 seconds.",
             raw_interval,
         )
-        return 300
+        return 7200
 
     if interval < 60:
         logger.warning(
@@ -59,6 +59,22 @@ def sync_data_from_biotime():
     APScheduler is configured with max_instances=1, so overlapping runs are
     prevented at the scheduler level — no in-process lock is needed here.
     """
+    start_time_str = os.getenv('BIOTIME_SYNC_START_TIME', '08:00')
+    end_time_str = os.getenv('BIOTIME_SYNC_END_TIME', '16:30')
+    
+    try:
+        start_time = datetime.strptime(start_time_str, '%H:%M').time()
+        end_time = datetime.strptime(end_time_str, '%H:%M').time()
+    except ValueError:
+        logger.error("Invalid BIOTIME_SYNC_START_TIME or BIOTIME_SYNC_END_TIME format. Use HH:MM")
+        start_time = datetime.strptime('08:00', '%H:%M').time()
+        end_time = datetime.strptime('16:30', '%H:%M').time()
+
+    now = datetime.now().time()
+    if not (start_time <= now <= end_time):
+        logger.info("Skipping BioTime data sync: current time is outside the allowed window (%s - %s)", start_time_str, end_time_str)
+        return
+
     logger.info("Starting BioTime data sync...")
     try:
         # Sync Employees / Enrollments
