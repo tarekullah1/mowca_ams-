@@ -2,6 +2,7 @@ import os
 import logging
 import requests
 from datetime import datetime, timedelta
+from django.utils import timezone
 from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -31,7 +32,7 @@ _cached_token = None
 def _log_connection_error(context: str, exc: Exception):
     """Log connection errors with rate-limiting to avoid log spam in production."""
     global _server_unreachable, _last_unreachable_log
-    now = datetime.now()
+    now = timezone.now()
     if (
         not _server_unreachable
         or _last_unreachable_log is None
@@ -143,7 +144,7 @@ def get_all_employees():
 def get_today_transactions():
     """Fetch all transactions for today."""
     url = f"{BIOTIME_SERVER_URL}/iclock/api/transactions/"
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_str = timezone.localtime().strftime("%Y-%m-%d")
     params = {
         "start_time": f"{today_str} 00:00:00",
         "end_time": f"{today_str} 23:59:59",
@@ -182,7 +183,7 @@ def get_attendance_summary():
     """
     Get the attendance summary by combining local synced employees and today's logs.
     """
-    today = datetime.now().date()
+    today = timezone.localtime().date()
     
     employees = EmployeeEnrollment.objects.all()
     transactions = AttendanceLog.objects.filter(event_date=today)

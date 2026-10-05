@@ -6,6 +6,7 @@ import tempfile
 import threading
 from threading import Lock
 from datetime import datetime
+from django.utils import timezone
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from django.db import DatabaseError
@@ -70,7 +71,7 @@ def sync_data_from_biotime():
         start_time = datetime.strptime('08:00', '%H:%M').time()
         end_time = datetime.strptime('16:30', '%H:%M').time()
 
-    now = datetime.now().time()
+    now = timezone.localtime().time()
     if not (start_time <= now <= end_time):
         logger.info("Skipping BioTime data sync: current time is outside the allowed window (%s - %s)", start_time_str, end_time_str)
         return
