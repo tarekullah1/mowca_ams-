@@ -340,6 +340,7 @@ def start_scheduler():
                 coalesce=True,
                 misfire_grace_time=max(SYNC_INTERVAL_SECONDS * 2, 120),
                 jitter=min(30, SYNC_INTERVAL_SECONDS // 10),
+                next_run_time=timezone.now(),
             )
             register_events(scheduler)
             scheduler.start()
