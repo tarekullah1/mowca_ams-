@@ -31,7 +31,7 @@ SECRET_KEY = 'django-insecure-t*l_owmv)ty_3l0$i5#4!c&o&rxjk$-spj%qxc&x6zg+xm82$m
 DEBUG = True
 
 ALLOWED_HOSTS = ['*']
-CSRF_TRUSTED_ORIGINS = ['https://mowcaams-production.up.railway.app', 'https://*.up.railway.app']
+CSRF_TRUSTED_ORIGINS = ['https://mowcaams-production.up.railway.app', 'https://*.up.railway.app', 'https://mowca-api.onrender.com', 'https://*.onrender.com']
 
 
 # Application definition
