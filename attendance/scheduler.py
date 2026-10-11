@@ -80,9 +80,17 @@ def sync_data_from_biotime():
     try:
         # Sync Employees / Enrollments
         employees = get_all_employees()
+        # Words that BioTime sometimes stores as last_name but are not real surnames
+        _JUNK_LAST_NAMES = {'of', 'mr', 'mrs', 'ms', 'dr', 'md', 'n/a', 'na', '-', '.'}
+
         for emp in employees:
             person_id = str(emp.get('emp_code'))
-            person_name = f"{emp.get('first_name', '')} {emp.get('last_name', '')}".strip()
+            first = (emp.get('first_name') or '').strip()
+            last = (emp.get('last_name') or '').strip()
+            # Drop last_name if it's a known junk/stub value
+            if last.lower() in _JUNK_LAST_NAMES:
+                last = ''
+            person_name = f"{first} {last}".strip()
             dept_data = emp.get('department')
             department = dept_data.get('dept_name') if isinstance(dept_data, dict) else str(dept_data)
 
