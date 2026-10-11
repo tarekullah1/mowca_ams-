@@ -3,6 +3,7 @@ import re
 import logging
 from django.shortcuts import render
 from django.http import JsonResponse
+from django.db.models import Q
 from .services import get_attendance_summary
 from .models import EmployeeEnrollment, AttendanceLog
 
@@ -53,20 +54,29 @@ def admin_force_sync_view(request):
 def admin_cleanup_names_view(request):
     """
     Secret endpoint to clean up 'None' / 'Of' junk suffixes in person_name fields.
-    Call: GET /admin/cleanup-names/?token=<ADMIN_SECRET>
+    Call: GET /manage/cleanup-names/?token=<ADMIN_SECRET>
     """
     if not _check_admin_secret(request):
         return JsonResponse({'error': 'Forbidden'}, status=403)
 
-    pattern = re.compile(r'\s*(\bNone\b|\bOf\b)\s*$', re.IGNORECASE)
+    # Matches one or more occurrences of 'Of', 'None', or 'Null' at the end of the name
+    pattern = re.compile(r'(\s+\b(None|Of|Null)\b)+\s*$', re.IGNORECASE)
     results = {}
 
     for Model, label in [(EmployeeEnrollment, 'EmployeeEnrollment'), (AttendanceLog, 'AttendanceLog')]:
-        qs = Model.objects.filter(person_name__iregex=r'\s+(None|Of)\s*$')
+        qs = Model.objects.filter(
+            Q(person_name__icontains='None') |
+            Q(person_name__iendswith='Of') |
+            Q(person_name__icontains=' Of ') |
+            Q(person_name__icontains='Null')
+        )
         count = 0
         for obj in qs:
-            cleaned = pattern.sub('', obj.person_name).strip()
-            if cleaned != obj.person_name:
+            original = obj.person_name or ''
+            cleaned = pattern.sub('', original).strip()
+            # Also collapse any duplicate internal spaces
+            cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+            if cleaned and cleaned != original:
                 obj.person_name = cleaned
                 obj.save(update_fields=['person_name'])
                 count += 1
