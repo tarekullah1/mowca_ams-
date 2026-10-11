@@ -167,6 +167,93 @@ def sync_data_from_biotime():
         logger.error("Error during BioTime data sync: %s", e)
 
 
+def _run_sync_core():
+    """
+    Core sync logic shared by the scheduled job and the force-sync endpoint.
+    Pulls employees and today's transactions from BioTime and saves to DB.
+    """
+    _JUNK_LAST_NAMES = {'of', 'mr', 'mrs', 'ms', 'dr', 'md', 'n/a', 'na', '-', '.'}
+
+    employees = get_all_employees()
+    for emp in employees:
+        person_id = str(emp.get('emp_code'))
+        first = (emp.get('first_name') or '').strip()
+        last = (emp.get('last_name') or '').strip()
+        if last.lower() in _JUNK_LAST_NAMES:
+            last = ''
+        person_name = f"{first} {last}".strip()
+
+        dept_data = emp.get('department')
+        department = dept_data.get('dept_name') if isinstance(dept_data, dict) else str(dept_data or '')
+
+        app_status = emp.get('app_status', 0)
+        enrollment_status = {0: "Active", 1: "Inactive"}.get(app_status, str(app_status))
+
+        hire_date_str = emp.get('hire_date')
+        enrollment_date = None
+        if hire_date_str:
+            try:
+                enrollment_date = datetime.strptime(hire_date_str, "%Y-%m-%d")
+            except ValueError:
+                pass
+
+        EmployeeEnrollment.objects.update_or_create(
+            person_id=person_id,
+            defaults={
+                'person_name': person_name,
+                'department': department,
+                'enrollment_status': enrollment_status,
+                'enrollment_date_time': enrollment_date,
+                'device_id': "Default",
+            }
+        )
+
+    transactions = get_today_transactions()
+    for tx in transactions:
+        log_id = str(tx.get('id'))
+        person_id = str(tx.get('emp_code'))
+
+        emp_enrollment = EmployeeEnrollment.objects.filter(person_id=person_id).first()
+        person_name = emp_enrollment.person_name if emp_enrollment else person_id
+
+        device_id = tx.get('terminal_alias') or tx.get('terminal_sn') or 'Unknown'
+
+        punch_time_str = tx.get('punch_time')
+        try:
+            dt = datetime.strptime(punch_time_str, "%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            continue
+
+        punch_state = str(tx.get('punch_state', ''))
+        event_type = {"0": "Check-in", "1": "Check-out", "2": "Break-out",
+                      "3": "Break-in", "4": "Overtime-in", "5": "Overtime-out"}.get(punch_state, punch_state)
+
+        verify_type = str(tx.get('verify_type', ''))
+        verification_method = {"1": "Fingerprint", "15": "Face", "4": "Card"}.get(verify_type, verify_type)
+
+        AttendanceLog.objects.update_or_create(
+            log_id=log_id,
+            defaults={
+                'person_id': person_id,
+                'person_name': person_name,
+                'device_id': device_id,
+                'event_date': dt.date(),
+                'event_time': dt.time(),
+                'event_type': event_type,
+                'verification_method': verification_method,
+            }
+        )
+
+    logger.info("Core sync completed.")
+
+
+def sync_biotime_data_force():
+    """Force a full BioTime sync, bypassing the time-window restriction."""
+    logger.info("Force sync triggered via admin endpoint.")
+    _run_sync_core()
+    logger.info("Force sync finished.")
+
+
 def shutdown_scheduler():
     global _scheduler
 
