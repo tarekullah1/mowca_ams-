@@ -37,15 +37,23 @@ def dashboard_data_view(request):
 def admin_force_sync_view(request):
     """
     Secret endpoint to force a full BioTime sync bypassing the time-window.
-    Call: GET /admin/force-sync/?token=<ADMIN_SECRET>
+    Spawns the sync in a background thread so the HTTP response returns immediately,
+    preventing 500 Internal Server Errors caused by web server (Gunicorn) timeouts.
+    Call: GET /manage/force-sync/?token=<ADMIN_SECRET>
     """
     if not _check_admin_secret(request):
         return JsonResponse({'error': 'Forbidden'}, status=403)
 
     try:
+        import threading
         from .scheduler import sync_biotime_data_force
-        sync_biotime_data_force()
-        return JsonResponse({'status': 'ok', 'message': 'Force sync completed successfully.'})
+
+        sync_thread = threading.Thread(target=sync_biotime_data_force, daemon=True)
+        sync_thread.start()
+        return JsonResponse({
+            'status': 'ok',
+            'message': 'Force sync started in background successfully. Check your API logs or endpoints in a moment.'
+        })
     except Exception as e:
         logger.exception('admin_force_sync_view error')
         return JsonResponse({'status': 'error', 'message': str(e)}, status=500)

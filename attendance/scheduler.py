@@ -111,6 +111,8 @@ def _run_sync_core():
         if hire_date_str:
             try:
                 enrollment_date = datetime.strptime(hire_date_str, "%Y-%m-%d")
+                if timezone.is_naive(enrollment_date):
+                    enrollment_date = timezone.make_aware(enrollment_date)
             except ValueError:
                 pass
 
