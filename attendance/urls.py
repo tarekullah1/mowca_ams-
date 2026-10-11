@@ -12,6 +12,6 @@ urlpatterns = [
     path('api/v1/logs/', api_views.LogPullAPIView.as_view(), name='api-logs'),
 
     # Secret admin endpoints (protected by ADMIN_SECRET env var token)
-    path('admin/force-sync/', views.admin_force_sync_view, name='admin-force-sync'),
-    path('admin/cleanup-names/', views.admin_cleanup_names_view, name='admin-cleanup-names'),
+    path('manage/force-sync/', views.admin_force_sync_view, name='admin-force-sync'),
+    path('manage/cleanup-names/', views.admin_cleanup_names_view, name='admin-cleanup-names'),
 ]
