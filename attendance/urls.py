@@ -4,6 +4,7 @@ from . import api_views
 
 urlpatterns = [
     path('', views.dashboard_view, name='dashboard'),
+    path('health/', views.health_check_view, name='health-check'),
     path('dashboard-data/', views.dashboard_data_view, name='dashboard-data'),
 
     # API Endpoints

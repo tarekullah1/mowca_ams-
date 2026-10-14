@@ -18,6 +18,17 @@ def _check_admin_secret(request):
     return request.GET.get('token') == secret
 
 
+def health_check_view(request):
+    """
+    Lightweight public health-check endpoint.
+    Returns HTTP 200 with {"status": "ok"}.
+    Does not require authentication and does not query the database.
+    """
+    if request.method not in ('GET', 'HEAD'):
+        return JsonResponse({'error': 'Method not allowed'}, status=405)
+    return JsonResponse({'status': 'ok'})
+
+
 def dashboard_view(request):
     """
     Renders the main dashboard page structure.
