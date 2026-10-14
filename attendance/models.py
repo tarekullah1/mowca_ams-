@@ -4,6 +4,7 @@ class EmployeeEnrollment(models.Model):
     person_id = models.CharField(max_length=100, unique=True, db_index=True)
     person_name = models.CharField(max_length=255)
     department = models.CharField(max_length=255, null=True, blank=True)
+    position = models.CharField(max_length=255, null=True, blank=True)
     enrollment_status = models.CharField(max_length=100, null=True, blank=True)
     enrollment_date_time = models.DateTimeField(null=True, blank=True)
     device_id = models.CharField(max_length=255, null=True, blank=True)

@@ -8,6 +8,7 @@ class EmployeeEnrollmentSerializer(serializers.ModelSerializer):
             'person_id',
             'person_name',
             'department',
+            'position',
             'enrollment_status',
             'enrollment_date_time',
             'device_id'

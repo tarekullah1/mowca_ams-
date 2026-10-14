@@ -198,7 +198,8 @@ def get_attendance_summary():
             'emp_code': emp.person_id,
             'first_name': emp.person_name,
             'last_name': '',
-            'department': {'dept_name': emp.department}
+            'department': {'dept_name': emp.department},
+            'position': getattr(emp, 'position', '') or ''
         }
         if emp.person_id in present_emp_codes:
             present_employees.append(emp_dict)

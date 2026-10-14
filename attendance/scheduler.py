@@ -109,6 +109,9 @@ def _run_sync_core():
             dept_data = emp.get('department')
             department = dept_data.get('dept_name') if isinstance(dept_data, dict) else str(dept_data or '')
 
+            pos_data = emp.get('position')
+            position = pos_data.get('position_name') if isinstance(pos_data, dict) else str(pos_data or '')
+
             app_status = emp.get('app_status', 0)
             enrollment_status = {0: "Active", 1: "Inactive"}.get(app_status, str(app_status))
 
@@ -131,6 +134,9 @@ def _run_sync_core():
                 if obj.department != department:
                     obj.department = department
                     changed = True
+                if getattr(obj, 'position', None) != position:
+                    obj.position = position
+                    changed = True
                 if obj.enrollment_status != enrollment_status:
                     obj.enrollment_status = enrollment_status
                     changed = True
@@ -141,6 +147,7 @@ def _run_sync_core():
                     person_id=person_id,
                     person_name=person_name,
                     department=department,
+                    position=position,
                     enrollment_status=enrollment_status,
                     enrollment_date_time=enrollment_date,
                     device_id="Default",
@@ -151,7 +158,7 @@ def _run_sync_core():
         if emps_to_create:
             EmployeeEnrollment.objects.bulk_create(emps_to_create, ignore_conflicts=True)
         if emps_to_update:
-            EmployeeEnrollment.objects.bulk_update(emps_to_update, ['person_name', 'department', 'enrollment_status'])
+            EmployeeEnrollment.objects.bulk_update(emps_to_update, ['person_name', 'department', 'position', 'enrollment_status'])
 
     # Build employee name lookup map in 1 query
     emp_name_map = {e.person_id: e.person_name for e in EmployeeEnrollment.objects.all()}
