@@ -19,15 +19,15 @@ logger = logging.getLogger(__name__)
 
 
 def _get_sync_interval_seconds():
-    raw_interval = os.getenv('BIOTIME_SYNC_INTERVAL_SECONDS', '7200')
+    raw_interval = os.getenv('BIOTIME_SYNC_INTERVAL_SECONDS', '600')
     try:
         interval = int(raw_interval)
     except ValueError:
         logger.warning(
-            "Invalid BIOTIME_SYNC_INTERVAL_SECONDS=%r; using 7200 seconds.",
+            "Invalid BIOTIME_SYNC_INTERVAL_SECONDS=%r; using 600 seconds.",
             raw_interval,
         )
-        return 7200
+        return 600
 
     if interval < 60:
         logger.warning(
@@ -60,16 +60,16 @@ def sync_data_from_biotime():
     APScheduler is configured with max_instances=1, so overlapping runs are
     prevented at the scheduler level — no in-process lock is needed here.
     """
-    start_time_str = os.getenv('BIOTIME_SYNC_START_TIME', '08:00')
-    end_time_str = os.getenv('BIOTIME_SYNC_END_TIME', '16:30')
+    start_time_str = os.getenv('BIOTIME_SYNC_START_TIME', '06:00')
+    end_time_str = os.getenv('BIOTIME_SYNC_END_TIME', '22:00')
     
     try:
         start_time = datetime.strptime(start_time_str, '%H:%M').time()
         end_time = datetime.strptime(end_time_str, '%H:%M').time()
     except ValueError:
         logger.error("Invalid BIOTIME_SYNC_START_TIME or BIOTIME_SYNC_END_TIME format. Use HH:MM")
-        start_time = datetime.strptime('08:00', '%H:%M').time()
-        end_time = datetime.strptime('16:30', '%H:%M').time()
+        start_time = datetime.strptime('06:00', '%H:%M').time()
+        end_time = datetime.strptime('22:00', '%H:%M').time()
 
     now = timezone.localtime().time()
     if not (start_time <= now <= end_time):
@@ -87,54 +87,89 @@ def sync_data_from_biotime():
 def _run_sync_core():
     """
     Core sync logic shared by the scheduled job and the force-sync endpoint.
-    Pulls employees and today's transactions from BioTime and saves to DB.
+    Pulls employees and today's transactions from BioTime and saves to DB
+    using efficient bulk operations (reducing hundreds of round-trips to just 4).
     """
     _JUNK_LAST_NAMES = {'of', 'none', 'null', 'mr', 'mrs', 'ms', 'dr', 'n/a', 'na', '-', '.'}
 
     employees = get_all_employees()
-    for emp in employees:
-        person_id = str(emp.get('emp_code'))
-        first = (emp.get('first_name') or '').strip()
-        last = (emp.get('last_name') or '').strip()
-        if last.lower() in _JUNK_LAST_NAMES:
-            last = ''
-        person_name = f"{first} {last}".strip()
+    if employees:
+        existing_emps = {e.person_id: e for e in EmployeeEnrollment.objects.all()}
+        emps_to_create = []
+        emps_to_update = []
 
-        dept_data = emp.get('department')
-        department = dept_data.get('dept_name') if isinstance(dept_data, dict) else str(dept_data or '')
+        for emp in employees:
+            person_id = str(emp.get('emp_code'))
+            first = (emp.get('first_name') or '').strip()
+            last = (emp.get('last_name') or '').strip()
+            if last.lower() in _JUNK_LAST_NAMES:
+                last = ''
+            person_name = f"{first} {last}".strip()
 
-        app_status = emp.get('app_status', 0)
-        enrollment_status = {0: "Active", 1: "Inactive"}.get(app_status, str(app_status))
+            dept_data = emp.get('department')
+            department = dept_data.get('dept_name') if isinstance(dept_data, dict) else str(dept_data or '')
 
-        hire_date_str = emp.get('hire_date')
-        enrollment_date = None
-        if hire_date_str:
-            try:
-                enrollment_date = datetime.strptime(hire_date_str, "%Y-%m-%d")
-                if timezone.is_naive(enrollment_date):
-                    enrollment_date = timezone.make_aware(enrollment_date)
-            except ValueError:
-                pass
+            app_status = emp.get('app_status', 0)
+            enrollment_status = {0: "Active", 1: "Inactive"}.get(app_status, str(app_status))
 
-        EmployeeEnrollment.objects.update_or_create(
-            person_id=person_id,
-            defaults={
-                'person_name': person_name,
-                'department': department,
-                'enrollment_status': enrollment_status,
-                'enrollment_date_time': enrollment_date,
-                'device_id': "Default",
-            }
-        )
+            hire_date_str = emp.get('hire_date')
+            enrollment_date = None
+            if hire_date_str:
+                try:
+                    enrollment_date = datetime.strptime(hire_date_str, "%Y-%m-%d")
+                    if timezone.is_naive(enrollment_date):
+                        enrollment_date = timezone.make_aware(enrollment_date)
+                except ValueError:
+                    pass
+
+            if person_id in existing_emps:
+                obj = existing_emps[person_id]
+                changed = False
+                if obj.person_name != person_name:
+                    obj.person_name = person_name
+                    changed = True
+                if obj.department != department:
+                    obj.department = department
+                    changed = True
+                if obj.enrollment_status != enrollment_status:
+                    obj.enrollment_status = enrollment_status
+                    changed = True
+                if changed:
+                    emps_to_update.append(obj)
+            else:
+                new_obj = EmployeeEnrollment(
+                    person_id=person_id,
+                    person_name=person_name,
+                    department=department,
+                    enrollment_status=enrollment_status,
+                    enrollment_date_time=enrollment_date,
+                    device_id="Default",
+                )
+                emps_to_create.append(new_obj)
+                existing_emps[person_id] = new_obj
+
+        if emps_to_create:
+            EmployeeEnrollment.objects.bulk_create(emps_to_create, ignore_conflicts=True)
+        if emps_to_update:
+            EmployeeEnrollment.objects.bulk_update(emps_to_update, ['person_name', 'department', 'enrollment_status'])
+
+    # Build employee name lookup map in 1 query
+    emp_name_map = {e.person_id: e.person_name for e in EmployeeEnrollment.objects.all()}
+
+    today = timezone.localtime().date()
+    existing_log_ids = set(
+        AttendanceLog.objects.filter(event_date=today).values_list('log_id', flat=True)
+    )
 
     transactions = get_today_transactions()
+    new_logs = []
     for tx in transactions:
         log_id = str(tx.get('id'))
+        if log_id in existing_log_ids:
+            continue
+
         person_id = str(tx.get('emp_code'))
-
-        emp_enrollment = EmployeeEnrollment.objects.filter(person_id=person_id).first()
-        person_name = emp_enrollment.person_name if emp_enrollment else person_id
-
+        person_name = emp_name_map.get(person_id, person_id)
         device_id = tx.get('terminal_alias') or tx.get('terminal_sn') or 'Unknown'
 
         punch_time_str = tx.get('punch_time')
@@ -150,20 +185,22 @@ def _run_sync_core():
         verify_type = str(tx.get('verify_type', ''))
         verification_method = {"1": "Fingerprint", "15": "Face", "4": "Card"}.get(verify_type, verify_type)
 
-        AttendanceLog.objects.update_or_create(
+        new_logs.append(AttendanceLog(
             log_id=log_id,
-            defaults={
-                'person_id': person_id,
-                'person_name': person_name,
-                'device_id': device_id,
-                'event_date': dt.date(),
-                'event_time': dt.time(),
-                'event_type': event_type,
-                'verification_method': verification_method,
-            }
-        )
+            person_id=person_id,
+            person_name=person_name,
+            device_id=device_id,
+            event_date=dt.date(),
+            event_time=dt.time(),
+            event_type=event_type,
+            verification_method=verification_method,
+        ))
+        existing_log_ids.add(log_id)
 
-    logger.info("Core sync completed.")
+    if new_logs:
+        AttendanceLog.objects.bulk_create(new_logs, ignore_conflicts=True)
+
+    logger.info("Core sync completed: %s new attendance logs inserted.", len(new_logs))
 
 
 def sync_biotime_data_force():
